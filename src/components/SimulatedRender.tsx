@@ -33,9 +33,9 @@ export function SimulatedRender({ testId }: { testId: string }) {
     // Helper to format RGB for CSS
     const toCssRgb = (rgb: { r: number, g: number, b: number }, alpha = 1) => {
       // Simple tone mapping (clamp and gamma)
-      const r = Math.max(0, Math.min(255, Math.pow(rgb.r, 1/2.2) * 255));
-      const g = Math.max(0, Math.min(255, Math.pow(rgb.g, 1/2.2) * 255));
-      const b = Math.max(0, Math.min(255, Math.pow(rgb.b, 1/2.2) * 255));
+      const r = Math.max(0, Math.min(255, Math.pow(Math.max(0, rgb.r), 1/2.2) * 255));
+      const g = Math.max(0, Math.min(255, Math.pow(Math.max(0, rgb.g), 1/2.2) * 255));
+      const b = Math.max(0, Math.min(255, Math.pow(Math.max(0, rgb.b), 1/2.2) * 255));
       return `rgba(${r}, ${g}, ${b}, ${alpha})`;
     };
 
@@ -166,7 +166,7 @@ export function SimulatedRender({ testId }: { testId: string }) {
         const coeffsA = projectToBasis(specA);
         const coeffsB = projectToBasis(specB);
         const coeffsIll = projectToBasis(illuminant);
-        // Very crude basis multiplication (just multiply coeffs for demo)
+        // Multiply the reconstructed basis representations (spectral product of the approximations)
         const basisReflectedA = (w: number) => Math.max(0, reconstructFromBasis(coeffsA, w) * reconstructFromBasis(coeffsIll, w));
         const basisReflectedB = (w: number) => Math.max(0, reconstructFromBasis(coeffsB, w) * reconstructFromBasis(coeffsIll, w));
         const basisRgbA = spectrumToRgb(basisReflectedA);

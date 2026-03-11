@@ -38,25 +38,33 @@ export function spectrumToRgb(spectrum: (w: number) => number) {
   return xyzToRgb(X * norm, Y * norm, Z * norm);
 }
 
+// Precompute orthogonal basis constants for the discrete wavelength domain
+const BASIS_C2 = wavelengths.reduce((sum, w) => sum + Math.pow((w - 580) / 200, 2), 0) / wavelengths.length;
+const NORM_0 = wavelengths.length;
+const NORM_1 = wavelengths.reduce((sum, w) => sum + Math.pow((w - 580) / 200, 2), 0);
+const NORM_2 = wavelengths.reduce((sum, w) => sum + Math.pow(Math.pow((w - 580) / 200, 2) - BASIS_C2, 2), 0);
+
 // Simple 3-component basis (e.g., low-frequency polynomials or cosines)
 export function projectToBasis(spectrum: (w: number) => number) {
   let c0 = 0, c1 = 0, c2 = 0;
   for (const w of wavelengths) {
     const val = spectrum(w);
+    const t = (w - 580) / 200;
     // Basis 0: flat
     c0 += val;
     // Basis 1: linear slope
-    c1 += val * ((w - 580) / 200);
-    // Basis 2: quadratic curve
-    c2 += val * (Math.pow((w - 580) / 200, 2) - 0.5);
+    c1 += val * t;
+    // Basis 2: quadratic curve (orthogonalized to b0)
+    c2 += val * (t * t - BASIS_C2);
   }
-  return [c0 / wavelengths.length, c1 / wavelengths.length, c2 / wavelengths.length];
+  return [c0 / NORM_0, c1 / NORM_1, c2 / NORM_2];
 }
 
 export function reconstructFromBasis(coeffs: number[], w: number) {
+  const t = (w - 580) / 200;
   const b0 = 1;
-  const b1 = (w - 580) / 200;
-  const b2 = Math.pow((w - 580) / 200, 2) - 0.5;
+  const b1 = t;
+  const b2 = t * t - BASIS_C2;
   return coeffs[0] * b0 + coeffs[1] * b1 + coeffs[2] * b2;
 }
 
