@@ -1,5 +1,6 @@
-import React, { useState } from 'react';
+import React, { useState, useMemo } from 'react';
 import { motion } from 'motion/react';
+import { spectrumToRgb, projectToBasis, reconstructFromBasis } from '../utils/spectralData';
 
 type RenderMode = 'rgb' | 'hero' | 'basis' | 'truth';
 
@@ -29,6 +30,15 @@ export function SimulatedRender({ testId }: { testId: string }) {
     const shiftX = (mousePos.x - 0.5) * 40;
     const shiftY = (mousePos.y - 0.5) * 40;
 
+    // Helper to format RGB for CSS
+    const toCssRgb = (rgb: { r: number, g: number, b: number }, alpha = 1) => {
+      // Simple tone mapping (clamp and gamma)
+      const r = Math.max(0, Math.min(255, Math.pow(rgb.r, 1/2.2) * 255));
+      const g = Math.max(0, Math.min(255, Math.pow(rgb.g, 1/2.2) * 255));
+      const b = Math.max(0, Math.min(255, Math.pow(rgb.b, 1/2.2) * 255));
+      return `rgba(${r}, ${g}, ${b}, ${alpha})`;
+    };
+
     switch (testId) {
       case 'led':
         return (
@@ -51,17 +61,43 @@ export function SimulatedRender({ testId }: { testId: string }) {
               transition={{ type: 'spring', stiffness: 100, damping: 30 }}
               style={{ transformStyle: 'preserve-3d' }}
             >
-              {['#ef4444', '#22c55e', '#3b82f6', '#06b6d4', '#f59e0b'].map((color, i) => {
-                const isRgbFail = mode === 'rgb' && (i === 3 || i === 4);
+              {[
+                { name: 'red', peak: 630, width: 200 },
+                { name: 'green', peak: 530, width: 200 },
+                { name: 'blue', peak: 460, width: 200 },
+                { name: 'cyan', peak: 490, width: 50 }, // Narrow
+                { name: 'amber', peak: 590, width: 50 } // Narrow
+              ].map((led, i) => {
                 
-                // Basis approximation slightly shifts colors and reduces intensity for narrow spikes
-                let displayColor = color;
-                if (isRgbFail) {
-                  displayColor = '#888888';
-                } else if (mode === 'basis' && (i === 3 || i === 4)) {
-                  // Cyan and Amber are narrow spikes, basis smooths them out a bit
-                  displayColor = i === 3 ? '#0ea5e9' : '#d97706'; 
+                // 1. Define the true spectrum
+                const spectrum = (w: number) => Math.exp(-Math.pow(w - led.peak, 2) / led.width);
+                
+                // 2. Ground Truth: Integrate spectrum directly to RGB
+                const truthRgb = spectrumToRgb(spectrum);
+                
+                // 3. Basis: Project to 3-component basis, then reconstruct and integrate
+                const coeffs = projectToBasis(spectrum);
+                const basisSpectrum = (w: number) => Math.max(0, reconstructFromBasis(coeffs, w));
+                const basisRgb = spectrumToRgb(basisSpectrum);
+                
+                // 4. RGB Transport: Just use the truth RGB (this is what an RGB renderer starts with)
+                // But for the "failure mode" demonstration, we simulate how RGB fails when interacting
+                // with a material. Let's say the material is a narrow bandpass filter.
+                // An RGB renderer multiplies colors. A spectral renderer multiplies spectra.
+                
+                // Let's just show the light color itself for now.
+                // The main difference is that the basis approximation smooths out the narrow spikes.
+                
+                let displayRgb = truthRgb;
+                if (mode === 'basis') {
+                  displayRgb = basisRgb;
+                } else if (mode === 'rgb' && (i === 3 || i === 4)) {
+                   // Simulate RGB failure: it can't represent the narrowness, so it looks washed out
+                   // when interacting with other things. We'll just desaturate it a bit here to show it's "wrong"
+                   displayRgb = { r: truthRgb.r * 0.5 + 0.2, g: truthRgb.g * 0.5 + 0.2, b: truthRgb.b * 0.5 + 0.2 };
                 }
+
+                const displayColor = toCssRgb(displayRgb);
 
                 return (
                   <motion.div 
@@ -75,7 +111,6 @@ export function SimulatedRender({ testId }: { testId: string }) {
                       style={{ 
                         backgroundColor: displayColor,
                         boxShadow: `0 0 20px ${displayColor}`,
-                        opacity: mode === 'basis' && (i === 3 || i === 4) ? 0.85 : 1
                       }} 
                     />
                     {/* Shadow/Light cast */}
@@ -89,7 +124,7 @@ export function SimulatedRender({ testId }: { testId: string }) {
                       style={{ 
                         backgroundImage: `linear-gradient(to bottom, ${displayColor}, transparent)`,
                         mixBlendMode: mode === 'rgb' ? 'normal' : 'screen',
-                        opacity: mode === 'basis' && (i === 3 || i === 4) ? 0.4 : 0.6,
+                        opacity: 0.6,
                         transformOrigin: 'top'
                       }}
                     />
@@ -99,42 +134,91 @@ export function SimulatedRender({ testId }: { testId: string }) {
             </motion.div>
           </motion.div>
         );
-      case 'metamer':
+      case 'metamer': {
+        // Define the two metameric spectra
+        const specA = (w: number) => 0.5;
+        const specB = (w: number) => Math.max(0, Math.min(1, 0.5 + 0.4 * Math.sin((w - 400) / 30)));
+        
+        // Define an illuminant that changes based on mouse position
+        // Center: D65-ish (flat). Edges: Colored.
+        const illuminant = (w: number) => {
+           const r = Math.max(0, shiftX / 40); // Reddish if mouse right
+           const b = Math.max(0, -shiftX / 40); // Blueish if mouse left
+           return 1.0 + r * Math.exp(-Math.pow(w - 650, 2)/2000) + b * Math.exp(-Math.pow(w - 450, 2)/2000);
+        };
+
+        // Calculate reflected spectra
+        const reflectedA = (w: number) => specA(w) * illuminant(w);
+        const reflectedB = (w: number) => specB(w) * illuminant(w);
+
+        // Ground Truth RGB
+        const truthRgbA = spectrumToRgb(reflectedA);
+        const truthRgbB = spectrumToRgb(reflectedB);
+
+        // RGB Transport: Multiply RGB of illuminant by RGB of reflectance
+        const illRgb = spectrumToRgb(illuminant);
+        const refRgbA = spectrumToRgb(specA);
+        const refRgbB = spectrumToRgb(specB);
+        const rgbTransportA = { r: illRgb.r * refRgbA.r, g: illRgb.g * refRgbA.g, b: illRgb.b * refRgbA.b };
+        const rgbTransportB = { r: illRgb.r * refRgbB.r, g: illRgb.g * refRgbB.g, b: illRgb.b * refRgbB.b };
+
+        // Basis Transport
+        const coeffsA = projectToBasis(specA);
+        const coeffsB = projectToBasis(specB);
+        const coeffsIll = projectToBasis(illuminant);
+        // Very crude basis multiplication (just multiply coeffs for demo)
+        const basisReflectedA = (w: number) => Math.max(0, reconstructFromBasis(coeffsA, w) * reconstructFromBasis(coeffsIll, w));
+        const basisReflectedB = (w: number) => Math.max(0, reconstructFromBasis(coeffsB, w) * reconstructFromBasis(coeffsIll, w));
+        const basisRgbA = spectrumToRgb(basisReflectedA);
+        const basisRgbB = spectrumToRgb(basisReflectedB);
+
+        let displayA = truthRgbA;
+        let displayB = truthRgbB;
+
+        if (mode === 'rgb') {
+          displayA = rgbTransportA;
+          displayB = rgbTransportB;
+        } else if (mode === 'basis') {
+          displayA = basisRgbA;
+          displayB = basisRgbB;
+        }
+
         return (
           <motion.div 
             className="relative w-full h-full flex items-center justify-center bg-neutral-900 gap-4"
             style={{ perspective: 1000 }}
           >
             <motion.div 
-              className="w-40 h-40 rounded-xl transition-colors duration-500 shadow-2xl"
+              className="w-40 h-40 rounded-xl transition-colors duration-100 shadow-2xl"
               animate={{ rotateX, rotateY, z: 50 }}
               transition={{ type: 'spring', stiffness: 100, damping: 30 }}
               style={{ 
-                backgroundColor: mode === 'rgb' ? '#888888' : (mode === 'basis' ? '#9378c0' : '#9b82c8'),
+                backgroundColor: toCssRgb(displayA),
                 boxShadow: `${-shiftX}px ${-shiftY}px 40px rgba(0,0,0,0.5)`
               }}
             />
             <motion.div 
-              className="w-40 h-40 rounded-xl transition-colors duration-500 shadow-2xl"
+              className="w-40 h-40 rounded-xl transition-colors duration-100 shadow-2xl"
               animate={{ rotateX, rotateY, z: 50 }}
               transition={{ type: 'spring', stiffness: 100, damping: 30 }}
               style={{ 
-                backgroundColor: mode === 'rgb' ? '#888888' : (mode === 'basis' ? '#c07893' : '#c8829b'),
+                backgroundColor: toCssRgb(displayB),
                 boxShadow: `${-shiftX}px ${-shiftY}px 40px rgba(0,0,0,0.5)`
               }}
             />
-            {/* Lighting overlay that moves with mouse and changes color based on position to simulate different illuminants */}
+            {/* Lighting overlay */}
             <motion.div 
               className="absolute w-[200%] h-[200%] mix-blend-overlay pointer-events-none rounded-full blur-3xl" 
               animate={{ 
                 x: shiftX * 5, 
                 y: shiftY * 5,
-                backgroundColor: `rgba(${255 - Math.abs(shiftX)}, ${200 + shiftX}, ${100 + shiftY}, 0.15)`
+                backgroundColor: toCssRgb(illRgb, 0.15)
               }}
               transition={{ type: 'spring', stiffness: 50, damping: 40 }}
             />
           </motion.div>
         );
+      }
       case 'glass':
         return (
           <motion.div 
