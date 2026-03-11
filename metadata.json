@@ -1,0 +1,5 @@
+{
+  "name": "Spectral Torture Chamber",
+  "description": "A canonical test scene for spectral rendering, isolating failure modes of RGB transport.",
+  "requestFramePermissions": []
+}
