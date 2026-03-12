@@ -1,6 +1,6 @@
-import React, { useState, useMemo } from 'react';
+import React, { useState, useMemo, useEffect } from 'react';
 import { motion } from 'motion/react';
-import { spectrumToRgb, projectToBasis, reconstructFromBasis } from '../utils/spectralData';
+import { spectrumToRgb, projectToBasis, reconstructFromBasis, sampleHeroWavelength, sampleBasisTransport, computeGroundTruthPath, PathNode } from '../utils/spectralData';
 
 type RenderMode = 'rgb' | 'hero' | 'basis' | 'truth';
 
@@ -14,6 +14,20 @@ const MODES: { id: RenderMode; label: string; desc: string }[] = [
 export function SimulatedRender({ testId }: { testId: string }) {
   const [mode, setMode] = useState<RenderMode>('basis');
   const [mousePos, setMousePos] = useState({ x: 0.5, y: 0.5 });
+  const [samples, setSamples] = useState(1);
+
+  // Reset samples when mode or test changes
+  useEffect(() => {
+    setSamples(1);
+  }, [mode, testId]);
+
+  // Accumulate samples over time (simulating progressive rendering)
+  useEffect(() => {
+    if (samples < 1000) {
+      const timer = requestAnimationFrame(() => setSamples(s => s + 1));
+      return () => cancelAnimationFrame(timer);
+    }
+  }, [samples]);
 
   const isNoisy = mode === 'hero';
 
@@ -140,37 +154,43 @@ export function SimulatedRender({ testId }: { testId: string }) {
         const specB = (w: number) => Math.max(0, Math.min(1, 0.5 + 0.4 * Math.sin((w - 400) / 30)));
         
         // Define an illuminant that changes based on mouse position
-        // Center: D65-ish (flat). Edges: Colored.
         const illuminant = (w: number) => {
-           const r = Math.max(0, shiftX / 40); // Reddish if mouse right
-           const b = Math.max(0, -shiftX / 40); // Blueish if mouse left
+           const r = Math.max(0, shiftX / 40);
+           const b = Math.max(0, -shiftX / 40);
            return 1.0 + r * Math.exp(-Math.pow(w - 650, 2)/2000) + b * Math.exp(-Math.pow(w - 450, 2)/2000);
         };
 
-        // Calculate reflected spectra
-        const reflectedA = (w: number) => specA(w) * illuminant(w);
-        const reflectedB = (w: number) => specB(w) * illuminant(w);
+        // 1D Path: Light -> Metamer -> Camera
+        const pathA: PathNode[] = [specA];
+        const pathB: PathNode[] = [specB];
 
-        // Ground Truth RGB
-        const truthRgbA = spectrumToRgb(reflectedA);
-        const truthRgbB = spectrumToRgb(reflectedB);
+        // Compute Ground Truth
+        const truthRgbA = computeGroundTruthPath(pathA, illuminant);
+        const truthRgbB = computeGroundTruthPath(pathB, illuminant);
 
-        // RGB Transport: Multiply RGB of illuminant by RGB of reflectance
+        // Compute Basis Transport (Deterministic for this fixed path)
+        const basisRgbA = sampleBasisTransport(pathA, illuminant);
+        const basisRgbB = sampleBasisTransport(pathB, illuminant);
+
+        // Compute Hero Wavelength (Stochastic)
+        // We accumulate N samples to show variance reduction
+        const heroRgbA = { r: 0, g: 0, b: 0 };
+        const heroRgbB = { r: 0, g: 0, b: 0 };
+        for (let i = 0; i < samples; i++) {
+          const sampleA = sampleHeroWavelength(pathA, illuminant);
+          const sampleB = sampleHeroWavelength(pathB, illuminant);
+          heroRgbA.r += sampleA.r; heroRgbA.g += sampleA.g; heroRgbA.b += sampleA.b;
+          heroRgbB.r += sampleB.r; heroRgbB.g += sampleB.g; heroRgbB.b += sampleB.b;
+        }
+        heroRgbA.r /= samples; heroRgbA.g /= samples; heroRgbA.b /= samples;
+        heroRgbB.r /= samples; heroRgbB.g /= samples; heroRgbB.b /= samples;
+
+        // RGB Transport (Baseline failure mode)
         const illRgb = spectrumToRgb(illuminant);
         const refRgbA = spectrumToRgb(specA);
         const refRgbB = spectrumToRgb(specB);
         const rgbTransportA = { r: illRgb.r * refRgbA.r, g: illRgb.g * refRgbA.g, b: illRgb.b * refRgbA.b };
         const rgbTransportB = { r: illRgb.r * refRgbB.r, g: illRgb.g * refRgbB.g, b: illRgb.b * refRgbB.b };
-
-        // Basis Transport
-        const coeffsA = projectToBasis(specA);
-        const coeffsB = projectToBasis(specB);
-        const coeffsIll = projectToBasis(illuminant);
-        // Multiply the reconstructed basis representations (spectral product of the approximations)
-        const basisReflectedA = (w: number) => Math.max(0, reconstructFromBasis(coeffsA, w) * reconstructFromBasis(coeffsIll, w));
-        const basisReflectedB = (w: number) => Math.max(0, reconstructFromBasis(coeffsB, w) * reconstructFromBasis(coeffsIll, w));
-        const basisRgbA = spectrumToRgb(basisReflectedA);
-        const basisRgbB = spectrumToRgb(basisReflectedB);
 
         let displayA = truthRgbA;
         let displayB = truthRgbB;
@@ -181,6 +201,9 @@ export function SimulatedRender({ testId }: { testId: string }) {
         } else if (mode === 'basis') {
           displayA = basisRgbA;
           displayB = basisRgbB;
+        } else if (mode === 'hero') {
+          displayA = heroRgbA;
+          displayB = heroRgbB;
         }
 
         return (
@@ -188,8 +211,11 @@ export function SimulatedRender({ testId }: { testId: string }) {
             className="relative w-full h-full flex items-center justify-center bg-neutral-900 gap-4"
             style={{ perspective: 1000 }}
           >
+            <div className="absolute top-4 left-4 text-xs font-mono text-neutral-400 z-50">
+              Samples: {mode === 'hero' ? samples : '∞ (Analytic/Deterministic)'}
+            </div>
             <motion.div 
-              className="w-40 h-40 rounded-xl transition-colors duration-100 shadow-2xl"
+              className="w-40 h-40 rounded-xl shadow-2xl"
               animate={{ rotateX, rotateY, z: 50 }}
               transition={{ type: 'spring', stiffness: 100, damping: 30 }}
               style={{ 
@@ -198,7 +224,7 @@ export function SimulatedRender({ testId }: { testId: string }) {
               }}
             />
             <motion.div 
-              className="w-40 h-40 rounded-xl transition-colors duration-100 shadow-2xl"
+              className="w-40 h-40 rounded-xl shadow-2xl"
               animate={{ rotateX, rotateY, z: 50 }}
               transition={{ type: 'spring', stiffness: 100, damping: 30 }}
               style={{ 
@@ -219,7 +245,50 @@ export function SimulatedRender({ testId }: { testId: string }) {
           </motion.div>
         );
       }
-      case 'glass':
+      case 'glass': {
+        const blueGlass = (w: number) => Math.max(0.1, 1 - Math.pow((w - 450) / 100, 2));
+        const yellowGlass = (w: number) => Math.max(0.1, 1 - Math.pow((w - 580) / 150, 2));
+        const redGlass = (w: number) => Math.max(0.1, 1 - Math.pow((w - 650) / 100, 2));
+        const illuminant = (w: number) => 1.0;
+
+        // Individual spectra
+        const truthBlue = spectrumToRgb(w => illuminant(w) * blueGlass(w));
+        const truthYellow = spectrumToRgb(w => illuminant(w) * yellowGlass(w));
+        const truthRed = spectrumToRgb(w => illuminant(w) * redGlass(w));
+        
+        // Overlap spectrum
+        const truthOverlap = spectrumToRgb(w => illuminant(w) * blueGlass(w) * yellowGlass(w) * redGlass(w));
+
+        // RGB Transport
+        const rgbOverlap = {
+          r: truthBlue.r * truthYellow.r * truthRed.r,
+          g: truthBlue.g * truthYellow.g * truthRed.g,
+          b: truthBlue.b * truthYellow.b * truthRed.b
+        };
+
+        // Basis Transport
+        const coeffsBlue = projectToBasis(blueGlass);
+        const coeffsYellow = projectToBasis(yellowGlass);
+        const coeffsRed = projectToBasis(redGlass);
+        const coeffsIll = projectToBasis(illuminant);
+
+        const basisBlue = spectrumToRgb(w => Math.max(0, reconstructFromBasis(coeffsBlue, w) * reconstructFromBasis(coeffsIll, w)));
+        const basisYellow = spectrumToRgb(w => Math.max(0, reconstructFromBasis(coeffsYellow, w) * reconstructFromBasis(coeffsIll, w)));
+        const basisRed = spectrumToRgb(w => Math.max(0, reconstructFromBasis(coeffsRed, w) * reconstructFromBasis(coeffsIll, w)));
+        const basisOverlap = spectrumToRgb(w => Math.max(0, 
+          reconstructFromBasis(coeffsBlue, w) * 
+          reconstructFromBasis(coeffsYellow, w) * 
+          reconstructFromBasis(coeffsRed, w) * 
+          reconstructFromBasis(coeffsIll, w)
+        ));
+
+        let dBlue = truthBlue, dYellow = truthYellow, dRed = truthRed, dOverlap = truthOverlap;
+        if (mode === 'rgb') {
+          dBlue = truthBlue; dYellow = truthYellow; dRed = truthRed; dOverlap = rgbOverlap;
+        } else if (mode === 'basis') {
+          dBlue = basisBlue; dYellow = basisYellow; dRed = basisRed; dOverlap = basisOverlap;
+        }
+
         return (
           <motion.div 
             className="relative w-full h-full flex items-center justify-center bg-white"
@@ -232,30 +301,50 @@ export function SimulatedRender({ testId }: { testId: string }) {
               style={{ transformStyle: 'preserve-3d' }}
             >
               <motion.div 
-                className="absolute top-0 left-1/2 -translate-x-1/2 w-40 h-40 rounded-full mix-blend-multiply transition-colors duration-500"
+                className="absolute top-0 left-1/2 -translate-x-1/2 w-40 h-40 rounded-full mix-blend-multiply transition-colors duration-100"
                 animate={{ z: 60, x: shiftX * 0.5, y: shiftY * 0.5 }}
-                style={{ backgroundColor: mode === 'rgb' ? 'rgba(0,255,255,0.5)' : (mode === 'basis' ? 'rgba(0,190,240,0.75)' : 'rgba(0,200,255,0.8)') }}
+                style={{ backgroundColor: toCssRgb(dBlue, 0.8) }}
               />
               <motion.div 
-                className="absolute bottom-0 left-4 w-40 h-40 rounded-full mix-blend-multiply transition-colors duration-500"
+                className="absolute bottom-0 left-4 w-40 h-40 rounded-full mix-blend-multiply transition-colors duration-100"
                 animate={{ z: 30, x: shiftX * 0.2, y: shiftY * 0.2 }}
-                style={{ backgroundColor: mode === 'rgb' ? 'rgba(255,255,0,0.5)' : (mode === 'basis' ? 'rgba(240,190,0,0.75)' : 'rgba(255,200,0,0.8)') }}
+                style={{ backgroundColor: toCssRgb(dYellow, 0.8) }}
               />
               <motion.div 
-                className="absolute bottom-0 right-4 w-40 h-40 rounded-full mix-blend-multiply transition-colors duration-500"
+                className="absolute bottom-0 right-4 w-40 h-40 rounded-full mix-blend-multiply transition-colors duration-100"
                 animate={{ z: 0, x: -shiftX * 0.2, y: -shiftY * 0.2 }}
-                style={{ backgroundColor: mode === 'rgb' ? 'rgba(255,0,255,0.5)' : (mode === 'basis' ? 'rgba(240,0,90,0.75)' : 'rgba(255,0,100,0.8)') }}
+                style={{ backgroundColor: toCssRgb(dRed, 0.8) }}
               />
               {/* Center overlap simulation */}
               <motion.div 
-                className="absolute top-1/2 left-1/2 -translate-x-1/2 -translate-y-1/2 w-16 h-16 rounded-full blur-md transition-colors duration-500"
+                className="absolute top-1/2 left-1/2 -translate-x-1/2 -translate-y-1/2 w-20 h-20 rounded-full blur-md transition-colors duration-100 z-50"
                 animate={{ z: 45 }}
-                style={{ backgroundColor: mode === 'rgb' ? '#8b7355' : (mode === 'basis' ? '#1a1a1a' : '#000000') }}
+                style={{ backgroundColor: toCssRgb(dOverlap) }}
               />
             </motion.div>
           </motion.div>
         );
-      case 'prism':
+      }
+      case 'prism': {
+        const stops = 20;
+        const gradientStops = [];
+        
+        for (let i = 0; i <= stops; i++) {
+          const t = i / stops;
+          const w = 380 + t * 400; // 380 to 780
+          
+          const spectrum = (lambda: number) => Math.exp(-Math.pow(lambda - w, 2) / 200);
+          const truthRgb = spectrumToRgb(spectrum);
+          
+          const coeffs = projectToBasis(spectrum);
+          const basisRgb = spectrumToRgb(lambda => Math.max(0, reconstructFromBasis(coeffs, lambda)));
+          
+          let displayRgb = truthRgb;
+          if (mode === 'basis') displayRgb = basisRgb;
+          
+          gradientStops.push(`${toCssRgb(displayRgb)} ${t * 100}%`);
+        }
+
         return (
           <motion.div 
             className="relative w-full h-full flex items-center justify-center bg-neutral-950 overflow-hidden"
@@ -284,18 +373,15 @@ export function SimulatedRender({ testId }: { testId: string }) {
               />
             ) : (
               <motion.div 
-                className="absolute right-0 top-1/2 w-1/2 h-32 translate-y-12 blur-md transition-all duration-500"
+                className="absolute right-0 top-1/2 w-1/2 h-32 translate-y-12 blur-md transition-all duration-100"
                 animate={{ 
                   rotate: -12 - rotateY * 0.5, 
                   y: shiftY + 48, 
                   scaleY: 1 + Math.abs(rotateY) * 0.02,
-                  // The spectrum spreads out more as the prism rotates
                   height: 128 + Math.abs(rotateY) * 2 
                 }}
                 style={{
-                  backgroundImage: mode === 'basis' 
-                    ? 'linear-gradient(to bottom, #ef4444, #d97706, #22c55e, #0ea5e9, #9333ea)' // Slightly banded/muted for basis
-                    : 'linear-gradient(to bottom, #ef4444, #eab308, #22c55e, #3b82f6, #a855f7)', // Perfect spectrum for truth
+                  backgroundImage: `linear-gradient(to bottom, ${gradientStops.join(', ')})`,
                   opacity: 0.8,
                   transformOrigin: 'left center'
                 }}
@@ -303,14 +389,56 @@ export function SimulatedRender({ testId }: { testId: string }) {
             )}
           </motion.div>
         );
-      case 'fog':
+      }
+      case 'fog': {
+        const scattering = (w: number) => 1e11 / Math.pow(w, 4);
+        const absorption = (w: number) => 0.1 + 0.8 * Math.exp(-Math.pow(w - 600, 2) / 5000);
+        const extinction = (w: number) => scattering(w) + absorption(w);
+
+        const stops = 10;
+        const gradientStops = [];
+        for (let i = 0; i <= stops; i++) {
+          const t = i / stops;
+          const distance = 5 - t * 4;
+          
+          const illuminant = (w: number) => 1.0;
+          const fogSpectrum = (w: number) => illuminant(w) * scattering(w) * Math.exp(-extinction(w) * distance);
+
+          const truthRgb = spectrumToRgb(fogSpectrum);
+
+          const rgbScattering = spectrumToRgb(scattering);
+          const rgbExtinction = spectrumToRgb(extinction);
+          const rgbTransport = {
+            r: rgbScattering.r * Math.exp(-rgbExtinction.r * distance),
+            g: rgbScattering.g * Math.exp(-rgbExtinction.g * distance),
+            b: rgbScattering.b * Math.exp(-rgbExtinction.b * distance),
+          };
+
+          const coeffsFog = projectToBasis(fogSpectrum);
+          const basisRgb = spectrumToRgb(w => Math.max(0, reconstructFromBasis(coeffsFog, w)));
+
+          let displayRgb = truthRgb;
+          if (mode === 'rgb') displayRgb = rgbTransport;
+          else if (mode === 'basis') displayRgb = basisRgb;
+
+          // Normalize brightness for display
+          const maxVal = Math.max(displayRgb.r, displayRgb.g, displayRgb.b, 0.001);
+          const normalized = {
+            r: (displayRgb.r / maxVal) * (1 - t * 0.5),
+            g: (displayRgb.g / maxVal) * (1 - t * 0.5),
+            b: (displayRgb.b / maxVal) * (1 - t * 0.5),
+          };
+
+          gradientStops.push(`${toCssRgb(normalized, 1 - t * 0.8)} ${t * 100}%`);
+        }
+
         return (
           <motion.div 
             className="relative w-full h-full flex items-center justify-center bg-neutral-950"
             style={{ perspective: 1000 }}
           >
             <motion.div 
-              className="w-80 h-80 rounded-full transition-all duration-500"
+              className="w-80 h-80 rounded-full transition-all duration-100"
               animate={{ 
                 x: shiftX * 0.5, 
                 y: shiftY * 0.5,
@@ -318,19 +446,41 @@ export function SimulatedRender({ testId }: { testId: string }) {
               }}
               transition={{ type: 'spring', stiffness: 50, damping: 20 }}
               style={{
-                backgroundImage: mode === 'rgb' 
-                  ? `radial-gradient(circle at ${50 + shiftX}px ${50 + shiftY}px, rgba(255,255,255,0.8) 0%, rgba(100,100,100,0.2) 100%)`
-                  : (mode === 'basis' 
-                      ? `radial-gradient(circle at ${50 + shiftX}px ${50 + shiftY}px, rgba(250,240,190,0.85) 0%, rgba(190,140,50,0.55) 40%, rgba(60,110,190,0.2) 100%)`
-                      : `radial-gradient(circle at ${50 + shiftX}px ${50 + shiftY}px, rgba(255,250,200,0.9) 0%, rgba(200,150,50,0.6) 40%, rgba(50,100,200,0.2) 100%)`),
-                boxShadow: mode === 'rgb'
-                  ? '0 0 40px rgba(255,255,255,0.1)'
-                  : (mode === 'basis' ? '0 0 70px rgba(60,110,190,0.25)' : '0 0 80px rgba(50,100,200,0.3)')
+                backgroundImage: `radial-gradient(circle at ${50 + shiftX}px ${50 + shiftY}px, ${gradientStops.join(', ')})`,
+                boxShadow: `0 0 80px ${gradientStops[gradientStops.length - 1].split(' ')[0]}`
               }}
             />
           </motion.div>
         );
-      case 'thin-film':
+      }
+      case 'thin-film': {
+        const stops = 20;
+        const gradientStops = [];
+        for (let i = 0; i <= stops; i++) {
+          const t = i / stops;
+          const nd = 300 + t * 500 + shiftX * 2; 
+          
+          const reflectance = (w: number) => 0.5 + 0.5 * Math.cos((2 * Math.PI * nd) / w);
+          const illuminant = (w: number) => 1.0;
+
+          const truthRgb = spectrumToRgb(w => illuminant(w) * reflectance(w));
+          
+          const coeffsRef = projectToBasis(reflectance);
+          const coeffsIll = projectToBasis(illuminant);
+          const basisRgb = spectrumToRgb(w => Math.max(0, reconstructFromBasis(coeffsRef, w) * reconstructFromBasis(coeffsIll, w)));
+
+          const rgbR = 0.5 + 0.5 * Math.cos((2 * Math.PI * nd) / 650);
+          const rgbG = 0.5 + 0.5 * Math.cos((2 * Math.PI * nd) / 530);
+          const rgbB = 0.5 + 0.5 * Math.cos((2 * Math.PI * nd) / 450);
+          const rgbTransport = { r: rgbR, g: rgbG, b: rgbB };
+
+          let displayRgb = truthRgb;
+          if (mode === 'rgb') displayRgb = rgbTransport;
+          else if (mode === 'basis') displayRgb = basisRgb;
+
+          gradientStops.push(`${toCssRgb(displayRgb)} ${t * 100}%`);
+        }
+
         return (
           <motion.div 
             className="relative w-full h-full flex items-center justify-center bg-neutral-900 overflow-hidden"
@@ -345,17 +495,13 @@ export function SimulatedRender({ testId }: { testId: string }) {
               }}
               transition={{ type: 'spring', stiffness: 80, damping: 20 }}
               style={{
-                backgroundImage: mode === 'rgb'
-                  ? `linear-gradient(${45 + shiftX}deg, #ec4899, #eab308, #06b6d4)` // Fake, static rainbow texture
-                  : (mode === 'basis'
-                    ? `repeating-radial-gradient(circle at ${50 + shiftX}% ${50 + shiftY}%, #1e3a8a 0%, #06b6d4 8%, #eab308 16%, #ef4444 24%, #ec4899 32%, #8b5cf6 40%)`
-                    : `repeating-radial-gradient(circle at ${50 + shiftX}% ${50 + shiftY}%, #1e3a8a 0%, #06b6d4 5%, #eab308 10%, #ef4444 15%, #ec4899 20%, #8b5cf6 25%)`),
-                backgroundSize: mode === 'rgb' ? '100% 100%' : `${150 + Math.abs(shiftX)}% ${150 + Math.abs(shiftY)}%`,
+                backgroundImage: `linear-gradient(${45 + shiftX}deg, ${gradientStops.join(', ')})`,
                 boxShadow: `0 20px 40px rgba(0,0,0,0.5), inset 0 0 30px rgba(255,255,255,0.3)`
               }}
             />
           </motion.div>
         );
+      }
       default:
         return null;
     }
@@ -394,28 +540,8 @@ export function SimulatedRender({ testId }: { testId: string }) {
       >
         {renderContent()}
         
-        {/* Noise overlay for Hero Wavelength */}
-        {isNoisy && (
-          <div 
-            className="absolute inset-0 pointer-events-none opacity-50 mix-blend-overlay"
-            style={{
-              backgroundImage: `url("data:image/svg+xml,%3Csvg viewBox='0 0 200 200' xmlns='http://www.w3.org/2000/svg'%3E%3Cfilter id='noiseFilter'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.85' numOctaves='3' stitchTiles='stitch'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23noiseFilter)'/%3E%3C/svg%3E")`,
-            }}
-          />
-        )}
-        
         {/* Animated grain for Hero Wavelength to simulate temporal noise */}
-        {isNoisy && (
-          <motion.div 
-            className="absolute inset-0 pointer-events-none opacity-40 mix-blend-color-dodge"
-            animate={{ backgroundPosition: ['0% 0%', '100% 100%'] }}
-            transition={{ repeat: Infinity, duration: 0.2, ease: "linear" }}
-            style={{
-              backgroundImage: `url("data:image/svg+xml,%3Csvg viewBox='0 0 200 200' xmlns='http://www.w3.org/2000/svg'%3E%3Cfilter id='noiseFilter'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.9' numOctaves='1' stitchTiles='stitch'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23noiseFilter)'/%3E%3C/svg%3E")`,
-              backgroundSize: '200px 200px'
-            }}
-          />
-        )}
+        {/* Removed CSS noise overlay - we are now computing real Monte Carlo variance! */}
       </div>
     </div>
   );

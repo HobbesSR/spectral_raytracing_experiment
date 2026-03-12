@@ -38,37 +38,112 @@ export function spectrumToRgb(spectrum: (w: number) => number) {
   return xyzToRgb(X * norm, Y * norm, Z * norm);
 }
 
-// Precompute orthogonal basis constants for the discrete wavelength domain
-const BASIS_C2 = wavelengths.reduce((sum, w) => sum + Math.pow((w - 580) / 200, 2), 0) / wavelengths.length;
-const NORM_0 = wavelengths.length;
-const NORM_1 = wavelengths.reduce((sum, w) => sum + Math.pow((w - 580) / 200, 2), 0);
-const NORM_2 = wavelengths.reduce((sum, w) => sum + Math.pow(Math.pow((w - 580) / 200, 2) - BASIS_C2, 2), 0);
+const N_BASIS = 12;
+const WAVELENGTH_MIN = 380;
+const WAVELENGTH_RANGE = 400;
 
-// Simple 3-component basis (e.g., low-frequency polynomials or cosines)
+// Precompute orthogonal basis constants for the discrete wavelength domain
+const BASIS_NORMS = Array.from({ length: N_BASIS }, (_, k) => {
+  return wavelengths.reduce((sum, w) => {
+    const bk = Math.cos((k * Math.PI * (w - WAVELENGTH_MIN)) / WAVELENGTH_RANGE);
+    return sum + bk * bk;
+  }, 0);
+});
+
+// N-term discrete cosine basis
 export function projectToBasis(spectrum: (w: number) => number) {
-  let c0 = 0, c1 = 0, c2 = 0;
+  const coeffs = new Array(N_BASIS).fill(0);
   for (const w of wavelengths) {
     const val = spectrum(w);
-    const t = (w - 580) / 200;
-    // Basis 0: flat
-    c0 += val;
-    // Basis 1: linear slope
-    c1 += val * t;
-    // Basis 2: quadratic curve (orthogonalized to b0)
-    c2 += val * (t * t - BASIS_C2);
+    for (let k = 0; k < N_BASIS; k++) {
+      const bk = Math.cos((k * Math.PI * (w - WAVELENGTH_MIN)) / WAVELENGTH_RANGE);
+      coeffs[k] += val * bk;
+    }
   }
-  return [c0 / NORM_0, c1 / NORM_1, c2 / NORM_2];
+  return coeffs.map((c, k) => c / BASIS_NORMS[k]);
 }
 
+// ... existing imports/code ...
+
 export function reconstructFromBasis(coeffs: number[], w: number) {
-  const t = (w - 580) / 200;
-  const b0 = 1;
-  const b1 = t;
-  const b2 = t * t - BASIS_C2;
-  return coeffs[0] * b0 + coeffs[1] * b1 + coeffs[2] * b2;
+  let sum = 0;
+  for (let k = 0; k < coeffs.length; k++) {
+    const bk = Math.cos((k * Math.PI * (w - WAVELENGTH_MIN)) / WAVELENGTH_RANGE);
+    sum += coeffs[k] * bk;
+  }
+  return sum;
+}
+
+// --- 1D Path Tracer for Variance Comparison ---
+
+// A simple 1D path (e.g., Light -> Bounce 1 -> Bounce 2 -> Camera)
+// We define the spectral reflectance at each bounce.
+export type PathNode = (w: number) => number;
+
+// 1. Hero Wavelength Sampling
+// Picks a random wavelength, evaluates the path throughput for that wavelength,
+// and multiplies by the CMF for that wavelength.
+// Returns a single RGB sample.
+export function sampleHeroWavelength(path: PathNode[], light: (w: number) => number): { r: number, g: number, b: number } {
+  // Pick a random wavelength uniformly from the visible spectrum
+  const w = WAVELENGTH_MIN + Math.random() * WAVELENGTH_RANGE;
+  
+  // Evaluate path throughput at this wavelength
+  let throughput = light(w);
+  for (const node of path) {
+    throughput *= node(w);
+  }
+  
+  // Multiply by CMF and PDF (PDF = 1 / WAVELENGTH_RANGE)
+  const cmf = getXYZ(w);
+  const pdf = 1 / WAVELENGTH_RANGE;
+  const X = (throughput * cmf.x) / pdf;
+  const Y = (throughput * cmf.y) / pdf;
+  const Z = (throughput * cmf.z) / pdf;
+  
+  const norm = 1 / 106.8;
+  return xyzToRgb(X * norm, Y * norm, Z * norm);
+}
+
+// 2. Multiscale Spectral (Basis) Transport
+// Projects each node into the basis, multiplies the basis coefficients (crude spectral product),
+// and integrates the final reconstructed spectrum.
+// Returns a single RGB sample (deterministic for a fixed path).
+export function sampleBasisTransport(path: PathNode[], light: (w: number) => number): { r: number, g: number, b: number } {
+  // In a real renderer, the spatial path would be sampled stochastically.
+  // Here, the path is fixed, so the basis transport is deterministic.
+  
+  let currentCoeffs = projectToBasis(light);
+  
+  for (const node of path) {
+    const nodeCoeffs = projectToBasis(node);
+    // Multiply reconstructed spectra and project back (spectral product in basis space)
+    // For a cosine basis, this could be done analytically, but we'll do it numerically for simplicity
+    const productSpectrum = (w: number) => {
+      return Math.max(0, reconstructFromBasis(currentCoeffs, w)) * Math.max(0, reconstructFromBasis(nodeCoeffs, w));
+    };
+    currentCoeffs = projectToBasis(productSpectrum);
+  }
+  
+  const finalSpectrum = (w: number) => Math.max(0, reconstructFromBasis(currentCoeffs, w));
+  return spectrumToRgb(finalSpectrum);
+}
+
+// 3. Ground Truth
+// Numerically integrates the exact path throughput over all wavelengths.
+export function computeGroundTruthPath(path: PathNode[], light: (w: number) => number): { r: number, g: number, b: number } {
+  const finalSpectrum = (w: number) => {
+    let throughput = light(w);
+    for (const node of path) {
+      throughput *= node(w);
+    }
+    return throughput;
+  };
+  return spectrumToRgb(finalSpectrum);
 }
 
 export const ledData = wavelengths.map((w) => ({
+// ... rest of existing code ...
   wavelength: w,
   red: Math.exp(-Math.pow(w - 630, 2) / 200),
   green: Math.exp(-Math.pow(w - 530, 2) / 200),
